@@ -111,7 +111,7 @@ class VariationalAutoencoder(nn.Module):
 
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                init.xavier_normal(m.weight.data)
+                init.xavier_normal_(m.weight.data)
                 if m.bias is not None:
                     m.bias.data.zero_()
 
@@ -193,7 +193,7 @@ class GumbelAutoencoder(nn.Module):
 
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                init.xavier_normal(m.weight.data)
+                init.xavier_normal_(m.weight.data)
                 if m.bias is not None:
                     m.bias.data.zero_()
 
@@ -265,12 +265,12 @@ class LadderDecoder(nn.Module):
         self.sample = GaussianSample(h_dim, self.z_dim)
 
     def forward(self, x, l_mu=None, l_log_var=None):
+        print(55)
         if l_mu is not None:
             # Sample from this encoder layer and merge
             z = self.linear1(x)
             z = F.leaky_relu(self.batchnorm1(z), 0.1)
-            q_z, q_mu, q_log_var = self.merge(z, l_mu, l_log_var)
-
+   
         # Sample from the decoder and send forward
         z = self.linear2(x)
         z = F.leaky_relu(self.batchnorm2(z), 0.1)
@@ -304,7 +304,7 @@ class LadderVariationalAutoencoder(VariationalAutoencoder):
 
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                init.xavier_normal(m.weight.data)
+                init.xavier_normal_(m.weight.data)
                 if m.bias is not None:
                     m.bias.data.zero_()
 
