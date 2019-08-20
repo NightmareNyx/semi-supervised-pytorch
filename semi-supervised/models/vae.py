@@ -3,9 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 from torch.nn import init
+import numpy as np
 
 from layers import GaussianSample, GaussianMerge, GumbelSoftmax
 from inference import log_gaussian, log_standard_gaussian
+from utils import dynamic_partition, dynamic_stitch
 
 
 class Perceptron(nn.Module):
@@ -20,13 +22,12 @@ class Perceptron(nn.Module):
     def forward(self, x):
         for i, layer in enumerate(self.layers):
             x = layer(x)
-            if i == len(self.layers)-1 and self.output_activation is not None:
+            if i == len(self.layers) - 1 and self.output_activation is not None:
                 x = self.output_activation(x)
             else:
                 x = self.activation_fn(x)
 
         return x
-
 
 
 class Encoder(nn.Module):
@@ -47,7 +48,7 @@ class Encoder(nn.Module):
 
         [x_dim, h_dim, z_dim] = dims
         neurons = [x_dim, *h_dim]
-        linear_layers = [nn.Linear(neurons[i-1], neurons[i]) for i in range(1, len(neurons))]
+        linear_layers = [nn.Linear(neurons[i - 1], neurons[i]) for i in range(1, len(neurons))]
 
         self.hidden = nn.ModuleList(linear_layers)
         self.sample = sample_layer(h_dim[-1], z_dim)
@@ -76,7 +77,7 @@ class Decoder(nn.Module):
         [z_dim, h_dim, x_dim] = dims
 
         neurons = [z_dim, *h_dim]
-        linear_layers = [nn.Linear(neurons[i-1], neurons[i]) for i in range(1, len(neurons))]
+        linear_layers = [nn.Linear(neurons[i - 1], neurons[i]) for i in range(1, len(neurons))]
         self.hidden = nn.ModuleList(linear_layers)
 
         self.reconstruction = nn.Linear(h_dim[-1], x_dim)
@@ -87,6 +88,103 @@ class Decoder(nn.Module):
         for layer in self.hidden:
             x = F.relu(layer(x))
         return self.output_activation(self.reconstruction(x))
+
+
+class HIDecoder(nn.Module):
+    def __init__(self, dims, types_list, miss_list):
+        """
+        Generative network
+
+        Generates samples from the original distribution
+        p(x) by transforming a latent representation, e.g.
+        by finding p_θ(x|z).
+
+        :param dims: dimensions of the networks
+            given by the number of neurons on the form
+            [latent_dim, [hidden_dims], input_dim].
+        """
+        super(HIDecoder, self).__init__()
+
+        [z_dim, h_dim, gamma_dim, x_dim] = dims
+
+        self.types_list = types_list
+        self.miss_list = miss_list
+        self.gamma_dim_partition = gamma_dim * np.ones(len(types_list), dtype=int)
+        self.gamma_dim_output = np.sum(self.gamma_dim_partition)
+        self.hidden = None
+        gamma_input_dim = z_dim
+        if h_dim is not None or h_dim != [] or h_dim != 0:
+            neurons = [z_dim, *h_dim]
+            linear_layers = [nn.Linear(neurons[i - 1], neurons[i]) for i in range(1, len(neurons))]
+            self.hidden = nn.ModuleList(linear_layers)
+            gamma_input_dim = h_dim[-1]
+        # deterministic homogeneous gamma layer
+        self.gamma = nn.Linear(gamma_input_dim, self.gamma_dim_output)
+        self.obs_layer = self.get_obs_layers(gamma_dim)
+        ## TODO ????
+        self.reconstruction = nn.Linear(h_dim[-1], x_dim)
+
+        self.output_activation = nn.Sigmoid()
+
+    def get_obs_layers(self, gamma_dim):
+        # Different layer models for each type of variable
+        obs_layers = []
+        for type in self.types_list:
+            if type['type'] == 'real' or type['type'] == 'pos':
+                obs_layers.append([nn.Linear(gamma_dim, self.types_list['dim']),  # mean
+                                  nn.Linear(gamma_dim, self.types_list['dim'])])  # sigma
+            elif type['type'] == 'count':
+                obs_layers.append([nn.Linear(gamma_dim, self.types_list['dim'])])  # lambda
+            elif type['type'] == 'cat':
+                obs_layers.append([nn.Linear(gamma_dim, self.types_list['dim'] - 1)])  # log pi
+            elif type['type'] == 'ord':
+                obs_layers.append([nn.Linear(gamma_dim, self.types_list['dim'] - 1),  # theta
+                                   nn.Linear(gamma_dim, 1)])                     # mean, single value
+        return obs_layers
+
+    def forward(self, z):
+        if self.hidden is not None:
+            for layer in self.hidden:
+                z = F.relu(layer(z))
+        # Deterministic homogeneous representation gamma = g(z)
+        gamma = self.gamma_layer(z)
+        gamma_grouped = self.gamma_partition(gamma)
+        theta = self.theta_estimation_from_gamma(gamma_grouped)
+        return self.output_activation(self.reconstruction(z))
+
+    def gamma_partition(self, gamma):
+        grouped_samples_gamma = []
+        # First element must be 0 and the length of the partition vector must be len(types_dict)+1
+        if len(self.gamma_dim_partition) != len(self.types_list):
+            raise Exception("The length of the partition vector must match the number of variables in the data + 1")
+        # Insert a 0 at the beginning of the cumsum vector
+        partition_vector_cumsum = np.insert(np.cumsum(self.gamma_dim_partition), 0, 0)
+        for i in range(len(self.types_list)):
+            grouped_samples_gamma.append(gamma[:, partition_vector_cumsum[i]:partition_vector_cumsum[i + 1]])
+        return grouped_samples_gamma
+
+    def theta_estimation_from_gamma(self, gamma):
+        theta = []
+        # independent yd -> Compute p(xd|yd)
+        for i, d in enumerate(gamma):
+            # Partition the data in missing data (0) and observed data (1)
+            missing_y, observed_y = dynamic_partition(d, self.miss_list[:, i], 2)
+            condition_indices = dynamic_partition(torch.arange(d.size()[0]), self.miss_list[:, i], 2)
+            # Different layer models for each type of variable
+            params = self.observed_data_layer(observed_y, missing_y, condition_indices, i)
+            theta.append(params)
+        return theta
+
+    def observed_data_layer(self, observed_data, missing_data, condition_indices, i):
+        outputs = []
+        for obs_layer_param in self.obs_layer[i]:
+            obs_output = obs_layer_param(observed_data)
+            with torch.no_grad:
+                miss_output = obs_layer_param(missing_data)
+            # Join back the data
+            output = dynamic_stitch(condition_indices, [miss_output, obs_output])
+            outputs.append(output)
+        return outputs
 
 
 class VariationalAutoencoder(nn.Module):
@@ -123,7 +221,7 @@ class VariationalAutoencoder(nn.Module):
         KL(q||p) = -∫ q(z) log [ p(z) / q(z) ]
                  = -E[log p(z) - log q(z)]
 
-        :param z: sample from q-distribuion
+        :param z: sample from q-distribution
         :param q_param: (mu, log_var) of the q-distribution
         :param p_param: (mu, log_var) of the p-distribution
         :return: KL(q||p)
@@ -199,7 +297,7 @@ class GumbelAutoencoder(nn.Module):
 
     def _kld(self, qz):
         k = Variable(torch.FloatTensor([self.z_dim]), requires_grad=False)
-        kl = qz * (torch.log(qz + 1e-8) - torch.log(1.0/k))
+        kl = qz * (torch.log(qz + 1e-8) - torch.log(1.0 / k))
         kl = kl.view(-1, self.n_samples, self.z_dim)
         return torch.sum(torch.sum(kl, dim=1), dim=1)
 
@@ -326,7 +424,7 @@ class LadderVariationalAutoencoder(VariationalAutoencoder):
             if i == 0:
                 self.kl_divergence += self._kld(z, (l_mu, l_log_var))
 
-            # Perform downword merge of information.
+            # Perform downward merge of information.
             else:
                 z, kl = decoder(z, l_mu, l_log_var)
                 self.kl_divergence += self._kld(*kl)
