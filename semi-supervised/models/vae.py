@@ -7,7 +7,9 @@ import numpy as np
 
 from layers import GaussianSample, GaussianMerge, GumbelSoftmax
 from inference import log_gaussian, log_standard_gaussian
-from utils import dynamic_partition, dynamic_stitch
+from utils import dynamic_partition, dynamic_stitch, batch_normalization
+
+from inference import loglik
 
 
 class Perceptron(nn.Module):
@@ -121,10 +123,8 @@ class HIDecoder(nn.Module):
         # deterministic homogeneous gamma layer
         self.gamma = nn.Linear(gamma_input_dim, self.gamma_dim_output)
         self.obs_layer = self.get_obs_layers(gamma_dim)
-        ## TODO ????
-        self.reconstruction = nn.Linear(h_dim[-1], x_dim)
-
-        self.output_activation = nn.Sigmoid()
+        # self.reconstruction = nn.Linear(h_dim[-1], x_dim)
+        # self.output_activation = nn.Sigmoid()
 
     def get_obs_layers(self, gamma_dim):
         # Different layer models for each type of variable
@@ -150,7 +150,28 @@ class HIDecoder(nn.Module):
         gamma = self.gamma_layer(z)
         gamma_grouped = self.gamma_partition(gamma)
         theta = self.theta_estimation_from_gamma(gamma_grouped)
-        return self.output_activation(self.reconstruction(z))
+        log_p_x, log_p_x_missing, samples_x, params_x = self.loglik_and_reconstruction(theta)
+        return log_p_x, log_p_x_missing, samples_x, params_x
+
+    def loglik_and_reconstruction(self, theta, batch_data_list, normalization_params):
+        log_p_x = []
+        log_p_x_missing = []
+        samples_x = []
+        params_x = []
+
+        # independent gamma_d -> Compute log(p(xd|gamma_d))
+        for i, d in enumerate(batch_data_list):
+            # Select the likelihood for the types of variables
+            loglik_function = getattr(loglik, 'loglik_' + self.types_list[i]['type'])
+
+            out = loglik_function([d, self.miss_list[:, i]], self.types_list[i], theta[i], normalization_params[i])
+
+            log_p_x.append(out['log_p_x'])
+            log_p_x_missing.append(out['log_p_x_missing'])  # Test-loglik element
+            samples_x.append(out['samples'])
+            params_x.append(out['params'])
+
+        return log_p_x, log_p_x_missing, samples_x, params_x
 
     def gamma_partition(self, gamma):
         grouped_samples_gamma = []

@@ -20,7 +20,7 @@ from utils import one_hot, sequence_mask
 from inference.loss_functions import log_poisson_loss
 
 
-def loglik_real(batch_data, list_type, theta, normalization_params, tau2, kernel_initializer, name, reuse):
+def loglik_real(batch_data, list_type, theta, normalization_params):
     output = dict()
     epsilon = 1e-3
 
@@ -42,7 +42,7 @@ def loglik_real(batch_data, list_type, theta, normalization_params, tau2, kernel
     # Compute loglik
     # TODO find pytorch func for this maybe
     #  torch.distributions.multivariate_normal.MultivariateNormal(loc, covariance_matrix=None,
-    #  precision_matrix=None, scale_tril=None, validate_args=None)
+    #  precision_matsrix=None, scale_tril=None, validate_args=None)
     log_p_x = -0.5 * torch.sum(torch.pow(data - est_mean, 2) / est_var, 1) - int(
         list_type['dim']) * 0.5 * torch.log(2 * np.pi) - 0.5 * torch.sum(torch.log(est_var), 1)
     #    log_p_x = -0.5 * tf.reduce_sum(tf.squared_difference(data,est_mean),1)
@@ -57,7 +57,7 @@ def loglik_real(batch_data, list_type, theta, normalization_params, tau2, kernel
     return output
 
 
-def loglik_pos(batch_data, list_type, theta, normalization_params, tau2, kernel_initializer, name, reuse):
+def loglik_pos(batch_data, list_type, theta, normalization_params):
     # Log-normal distribution
     output = dict()
     epsilon = 1e-3
@@ -91,7 +91,7 @@ def loglik_pos(batch_data, list_type, theta, normalization_params, tau2, kernel_
     return output
 
 
-def loglik_cat(batch_data, list_type, theta, normalization_params, tau2, kernel_initializer, name, reuse):
+def loglik_cat(batch_data, list_type, theta, normalization_params):
     output = dict()
 
     # Data outputs
@@ -115,7 +115,7 @@ def loglik_cat(batch_data, list_type, theta, normalization_params, tau2, kernel_
     return output
 
 
-def loglik_ordinal(batch_data, list_type, theta, normalization_params, tau2, kernel_initializer, name, reuse):
+def loglik_ordinal(batch_data, list_type, theta, normalization_params):
     output = dict()
     epsilon = 1e-6
 
@@ -153,7 +153,7 @@ def loglik_ordinal(batch_data, list_type, theta, normalization_params, tau2, ker
     return output
 
 
-def loglik_count(batch_data, list_type, theta, normalization_params, tau2, kernel_initializer, name, reuse):
+def loglik_count(batch_data, list_type, theta, normalization_params):
     output = dict()
     epsilon = 1e-6
 

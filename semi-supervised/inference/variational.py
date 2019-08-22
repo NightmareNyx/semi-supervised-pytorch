@@ -115,3 +115,69 @@ class SVI(nn.Module):
         # Equivalent to -U(x)
         U = L + H
         return torch.mean(U)
+
+
+class HISVI(nn.Module):
+    """
+    Stochastic variational inference (SVI) for Heterogeneous and Missing data.
+    Here the likelihood parameter is missing because it's incorporated in the HIDecoder.
+    """
+    base_sampler = ImportanceWeightedSampler(mc=1, iw=1)
+
+    def __init__(self, model, beta=repeat(1), sampler=base_sampler):
+        """
+        Initialises a new SVI optimizer for semi-
+        supervised learning.
+        :param model: semi-supervised model to evaluate
+        :param sampler: sampler for x and y, e.g. for Monte Carlo
+        :param beta: warm-up/scaling of KL-term
+        """
+        super(HISVI, self).__init__()
+        self.model = model
+        self.sampler = sampler
+        self.beta = beta
+
+    def forward(self, x, y=None):
+        is_labelled = False if y is None else True
+
+        # Prepare for sampling
+        xs, ys = (x, y)
+
+        # Enumerate choices of label
+        if not is_labelled:
+            ys = enumerate_discrete(xs, self.model.y_dim)
+            xs = xs.repeat(self.model.y_dim, 1)
+
+        # Increase sampling dimension
+        xs = self.sampler.resample(xs)
+        ys = self.sampler.resample(ys)
+
+        # p(x|y,z)
+        log_p_x, log_p_x_missing, samples_x, params_x = self.model(xs, ys)
+
+        # Eq[log_p(x|y)] # TODO ???
+        loss_reconstruction = torch.sum(log_p_x, 0)
+
+        # likelihood = -self.likelihood(reconstruction, xs)
+
+        # p(y)
+        prior = -log_standard_categorical(ys)
+
+        # Equivalent to -L(x, y)
+        elbo = log_p_x + prior - next(self.beta) * self.model.kl_divergence
+        L = self.sampler(elbo)
+
+        if is_labelled:
+            return torch.mean(L)
+
+        logits = self.model.classify(x)
+
+        L = L.view_as(logits.t()).t()
+
+        # Calculate entropy H(q(y|x)) and sum over all labels
+        H = -torch.sum(torch.mul(logits, torch.log(logits + 1e-8)), dim=-1)
+        L = torch.sum(torch.mul(logits, L), dim=-1)
+
+        # Equivalent to -U(x)
+        U = L + H
+        return torch.mean(U)
