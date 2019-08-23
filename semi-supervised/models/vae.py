@@ -142,7 +142,7 @@ class HIDecoder(nn.Module):
                                    nn.Linear(gamma_dim, 1)])                     # mean, single value
         return obs_layers
 
-    def forward(self, z):
+    def forward(self, z, batch_x, norm_params):
         if self.hidden is not None:
             for layer in self.hidden:
                 z = F.relu(layer(z))
@@ -150,7 +150,7 @@ class HIDecoder(nn.Module):
         gamma = self.gamma_layer(z)
         gamma_grouped = self.gamma_partition(gamma)
         theta = self.theta_estimation_from_gamma(gamma_grouped)
-        log_p_x, log_p_x_missing, samples_x, params_x = self.loglik_and_reconstruction(theta)
+        log_p_x, log_p_x_missing, samples_x, params_x = self.loglik_and_reconstruction(theta, batch_x, norm_params)
         return log_p_x, log_p_x_missing, samples_x, params_x
 
     def loglik_and_reconstruction(self, theta, batch_data_list, normalization_params):
