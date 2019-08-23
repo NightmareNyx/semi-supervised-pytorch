@@ -26,6 +26,7 @@ class Stochastic(nn.Module):
 
         return z
 
+
 class GaussianSample(Stochastic):
     """
     Layer that represents a sample from a

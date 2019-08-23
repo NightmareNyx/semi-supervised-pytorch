@@ -174,7 +174,7 @@ class AuxiliaryDeepGenerativeModel(DeepGenerativeModel):
 
 
 class HIAuxiliaryDeepGenerativeModel(AuxiliaryDeepGenerativeModel):
-    def __init(self, dims, types_list):
+    def __init(self, dims, types_list, miss_list):
         """
         HI-Auxiliary Deep Generative Model. The HI-ADGM introduces an additional
         latent variable 'a', which enables the model to fit
@@ -187,7 +187,7 @@ class HIAuxiliaryDeepGenerativeModel(AuxiliaryDeepGenerativeModel):
         [x_dim, y_dim, z_dim, a_dim, gamma_dim, h_dim] = dims
         super(HIAuxiliaryDeepGenerativeModel, self).__init__([x_dim, y_dim, z_dim, a_dim, h_dim])
 
-        self.decoder = HIDecoder([y_dim, h_dim, self.gamma_dim_output, x_dim])  # p(x|z,g(z))
+        self.decoder = HIDecoder([y_dim, h_dim, self.gamma_dim_output, x_dim], types_list, miss_list)  # p(x|z,g(z))
 
     def forward(self, x, y):
         """
@@ -214,6 +214,25 @@ class HIAuxiliaryDeepGenerativeModel(AuxiliaryDeepGenerativeModel):
         self.kl_divergence = a_kl + z_kl
 
         return log_p_x, log_p_x_missing, samples_x, params_x
+
+    def sample(self, z, y):
+        """
+        Samples from the Decoder to generate an x.
+        :param z: latent normal variable
+        :param y: label (one-hot encoded)
+        :return: x
+        """
+        y = y.float()
+        log_p_x, log_p_x_missing, samples_x, params_x = self.decoder(torch.cat([z, y], dim=1))
+        return samples_x
+
+    def classify(self, x):
+        # Auxiliary inference q(a|x)
+        a, a_mu, a_log_var = self.aux_encoder(x)
+
+        # Classification q(y|a,x)
+        logits = self.classifier(torch.cat([x, a], dim=1))
+        return logits
 
 
 class LadderDeepGenerativeModel(DeepGenerativeModel):
