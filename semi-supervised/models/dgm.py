@@ -203,7 +203,7 @@ class HIAuxiliaryDeepGenerativeModel(AuxiliaryDeepGenerativeModel):
         z, z_mu, z_log_var = self.encoder(torch.cat([x, y, q_a], dim=1))
 
         # Generative p(x|g(z),y)
-        x_mu = self.decoder(torch.cat([z, y], dim=1))
+        log_p_x, log_p_x_missing, samples_x, params_x = self.decoder(torch.cat([z, y], dim=1))
 
         # Generative p(a|z,y,x)
         p_a, p_a_mu, p_a_log_var = self.aux_decoder(torch.cat([x, y, z], dim=1))
@@ -213,7 +213,7 @@ class HIAuxiliaryDeepGenerativeModel(AuxiliaryDeepGenerativeModel):
 
         self.kl_divergence = a_kl + z_kl
 
-        return x_mu
+        return log_p_x, log_p_x_missing, samples_x, params_x
 
 
 class LadderDeepGenerativeModel(DeepGenerativeModel):
