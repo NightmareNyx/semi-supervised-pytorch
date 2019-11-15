@@ -4,7 +4,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from utils import log_sum_exp, enumerate_discrete
+from utils import log_sum_exp, enumerate_discrete, repeat_list, batch_normalization
 from inference.distributions import log_standard_categorical
 
 
@@ -25,6 +25,9 @@ class ImportanceWeightedSampler(object):
 
     def resample(self, x):
         return x.repeat(self.mc * self.iw, 1)
+
+    def resample_list(self, l):
+        return repeat_list(l, self.mc * self.iw)
 
     def __call__(self, elbo):
         elbo = elbo.view(self.mc, self.iw, -1)
@@ -100,12 +103,10 @@ class SVI(nn.Module):
         # Equivalent to -L(x, y)
         elbo = likelihood + prior - next(self.beta) * self.model.kl_divergence
         L = self.sampler(elbo)
-
         if is_labelled:
             return torch.mean(L)
 
         logits = self.model.classify(x)
-
         L = L.view_as(logits.t()).t()
 
         # Calculate entropy H(q(y|x)) and sum over all labels
@@ -137,7 +138,7 @@ class HISVI(nn.Module):
         self.sampler = sampler
         self.beta = beta
 
-    def forward(self, x, y=None):
+    def forward(self, x, y=None, miss_list=None):
         is_labelled = False if y is None else True
 
         # Prepare for sampling
@@ -147,24 +148,28 @@ class HISVI(nn.Module):
         if not is_labelled:
             ys = enumerate_discrete(xs, self.model.y_dim)
             xs = xs.repeat(self.model.y_dim, 1)
+            miss_list = miss_list.repeat(self.model.y_dim, 1)
 
         # Increase sampling dimension
         xs = self.sampler.resample(xs)
-        ys = self.sampler.resample(ys)
+        ys = self.sampler.resample(ys).float()
+        miss_list = self.sampler.resample(miss_list)
 
-        # p(x|y,z)
-        log_p_x, log_p_x_missing, samples_x, params_x = self.model(xs, ys)
+        # p(x|y,z) of observed and missing
+        # samples of x from decoder
+        # and their parameters
+        log_p_x, log_p_x_missing, samples_x, params_x = self.model(xs, ys, miss_list)
 
-        # Eq[log_p(x|y)] # TODO ???
-        loss_reconstruction = torch.sum(log_p_x, 0)
-
-        # likelihood = -self.likelihood(reconstruction, xs)
+        # Eq[log_p(x|z, y)]
+        reconstruction_loss = torch.sum(log_p_x, 1, keepdim=True)
+        # likelihood = -self.likelihood(samples_x, xs)  ## possibly with miss_mask?
 
         # p(y)
-        prior = -log_standard_categorical(ys)
+        y_prior = -log_standard_categorical(ys).unsqueeze(1)
 
         # Equivalent to -L(x, y)
-        elbo = log_p_x + prior - next(self.beta) * self.model.kl_divergence
+        elbo = reconstruction_loss + y_prior - next(self.beta) * self.model.kl_divergence
+
         L = self.sampler(elbo)
 
         if is_labelled:
@@ -174,7 +179,7 @@ class HISVI(nn.Module):
 
         L = L.view_as(logits.t()).t()
 
-        # Calculate entropy H(q(y|x)) and sum over all labels
+        # Calculate entropy H(q(y|x,a)) and sum over all labels
         H = -torch.sum(torch.mul(logits, torch.log(logits + 1e-8)), dim=-1)
         L = torch.sum(torch.mul(logits, L), dim=-1)
 

@@ -93,7 +93,7 @@ class Decoder(nn.Module):
 
 
 class HIDecoder(nn.Module):
-    def __init__(self, dims, types_list, miss_list):
+    def __init__(self, dims, types_list):
         """
         Generative network
 
@@ -110,7 +110,6 @@ class HIDecoder(nn.Module):
         [z_dim, h_dim, gamma_dim, x_dim] = dims
 
         self.types_list = types_list
-        self.miss_list = miss_list
         self.gamma_dim_partition = gamma_dim * np.ones(len(types_list), dtype=int)
         self.gamma_dim_output = np.sum(self.gamma_dim_partition)
         self.hidden = None
@@ -121,7 +120,7 @@ class HIDecoder(nn.Module):
             self.hidden = nn.ModuleList(linear_layers)
             gamma_input_dim = h_dim[-1]
         # deterministic homogeneous gamma layer
-        self.gamma = nn.Linear(gamma_input_dim, self.gamma_dim_output)
+        self.gamma_layer = nn.Linear(gamma_input_dim, self.gamma_dim_output)
         self.obs_layer = self.get_obs_layers(gamma_dim)
         # self.reconstruction = nn.Linear(h_dim[-1], x_dim)
         # self.output_activation = nn.Sigmoid()
@@ -130,48 +129,51 @@ class HIDecoder(nn.Module):
         # Different layer models for each type of variable
         obs_layers = []
         for type in self.types_list:
+            type_dim = type['dim']
             if type['type'] == 'real' or type['type'] == 'pos':
-                obs_layers.append([nn.Linear(gamma_dim, self.types_list['dim']),  # mean
-                                  nn.Linear(gamma_dim, self.types_list['dim'])])  # sigma
+                obs_layers.append(nn.ModuleList([nn.Linear(gamma_dim, type_dim),  # mean
+                                                nn.Linear(gamma_dim, type_dim)]))  # sigma
             elif type['type'] == 'count':
-                obs_layers.append([nn.Linear(gamma_dim, self.types_list['dim'])])  # lambda
+                obs_layers.append(nn.ModuleList([nn.Linear(gamma_dim, type_dim)]))  # lambda
             elif type['type'] == 'cat':
-                obs_layers.append([nn.Linear(gamma_dim, self.types_list['dim'] - 1)])  # log pi
+                obs_layers.append(nn.ModuleList[nn.Linear(gamma_dim, type_dim - 1)])  # log pi
             elif type['type'] == 'ord':
-                obs_layers.append([nn.Linear(gamma_dim, self.types_list['dim'] - 1),  # theta
-                                   nn.Linear(gamma_dim, 1)])                     # mean, single value
-        return obs_layers
+                obs_layers.append(nn.ModuleList[nn.Linear(gamma_dim, type_dim - 1),  # theta
+                                                nn.Linear(gamma_dim, 1)])           # mean, single value
+        return nn.ModuleList(obs_layers)
 
-    def forward(self, z, batch_x, norm_params):
+    def forward(self, z, batch_x, miss_list, norm_params):
         if self.hidden is not None:
             for layer in self.hidden:
                 z = F.relu(layer(z))
         # Deterministic homogeneous representation gamma = g(z)
         gamma = self.gamma_layer(z)
         gamma_grouped = self.gamma_partition(gamma)
-        theta = self.theta_estimation_from_gamma(gamma_grouped)
-        log_p_x, log_p_x_missing, samples_x, params_x = self.loglik_and_reconstruction(theta, batch_x, norm_params)
+        theta = self.theta_estimation_from_gamma(gamma_grouped, miss_list)
+
+        log_p_x, log_p_x_missing, samples_x, params_x = self.loglik_and_reconstruction(theta, batch_x,
+                                                                                       miss_list, norm_params)
         return log_p_x, log_p_x_missing, samples_x, params_x
 
-    def loglik_and_reconstruction(self, theta, batch_data_list, normalization_params):
+    def loglik_and_reconstruction(self, theta, batch_data, miss_list, normalization_params):
         log_p_x = []
         log_p_x_missing = []
         samples_x = []
         params_x = []
 
         # independent gamma_d -> Compute log(p(xd|gamma_d))
-        for i, d in enumerate(batch_data_list):
+        for i, d in enumerate(batch_data.T):
+            d = d.unsqueeze(1)
             # Select the likelihood for the types of variables
             loglik_function = getattr(loglik, 'loglik_' + self.types_list[i]['type'])
+            out = loglik_function([d, miss_list[:, i]], self.types_list[i], theta[i], normalization_params[i])
 
-            out = loglik_function([d, self.miss_list[:, i]], self.types_list[i], theta[i], normalization_params[i])
-
-            log_p_x.append(out['log_p_x'])
-            log_p_x_missing.append(out['log_p_x_missing'])  # Test-loglik element
+            log_p_x.append(out['log_p_x'].unsqueeze(1))
+            log_p_x_missing.append(out['log_p_x_missing'].unsqueeze(1))  # Test-loglik element
             samples_x.append(out['samples'])
             params_x.append(out['params'])
-
-        return log_p_x, log_p_x_missing, samples_x, params_x
+        # return log_p_x, log_p_x_missing, samples_x, params_x
+        return torch.cat(log_p_x, dim=1), torch.cat(log_p_x_missing, dim=1), torch.cat(samples_x, dim=1), params_x
 
     def gamma_partition(self, gamma):
         grouped_samples_gamma = []
@@ -184,13 +186,13 @@ class HIDecoder(nn.Module):
             grouped_samples_gamma.append(gamma[:, partition_vector_cumsum[i]:partition_vector_cumsum[i + 1]])
         return grouped_samples_gamma
 
-    def theta_estimation_from_gamma(self, gamma):
+    def theta_estimation_from_gamma(self, gamma, miss_list):
         theta = []
         # independent yd -> Compute p(xd|yd)
-        for i, d in enumerate(gamma):
+        for i, d in enumerate(gamma):  # gamma is a list
             # Partition the data in missing data (0) and observed data (1)
-            missing_y, observed_y = dynamic_partition(d, self.miss_list[:, i], 2)
-            condition_indices = dynamic_partition(torch.arange(d.size()[0]), self.miss_list[:, i], 2)
+            missing_y, observed_y = dynamic_partition(d, miss_list[:, i], 2)
+            condition_indices = dynamic_partition(torch.arange(d.size()[0]), miss_list[:, i], 2)
             # Different layer models for each type of variable
             params = self.observed_data_layer(observed_y, missing_y, condition_indices, i)
             theta.append(params)
@@ -200,10 +202,12 @@ class HIDecoder(nn.Module):
         outputs = []
         for obs_layer_param in self.obs_layer[i]:
             obs_output = obs_layer_param(observed_data)
-            with torch.no_grad:
+            with torch.no_grad():
                 miss_output = obs_layer_param(missing_data)
             # Join back the data
             output = dynamic_stitch(condition_indices, [miss_output, obs_output])
+            if len(self.obs_layer[i]) == 1:
+                return output
             outputs.append(output)
         return outputs
 
@@ -384,7 +388,6 @@ class LadderDecoder(nn.Module):
         self.sample = GaussianSample(h_dim, self.z_dim)
 
     def forward(self, x, l_mu=None, l_log_var=None):
-        print(55)
         if l_mu is not None:
             # Sample from this encoder layer and merge
             z = self.linear1(x)

@@ -1,5 +1,4 @@
 import torch
-from torch.autograd import Variable
 
 
 def enumerate_discrete(x, y_dim):
@@ -26,7 +25,13 @@ def enumerate_discrete(x, y_dim):
     if x.is_cuda:
         generated = generated.cuda()
 
-    return Variable(generated.float())
+    return generated.float()
+
+
+def repeat_list(l, times=2):
+    repeated = []
+    [repeated.extend(l) for _ in range(times)]
+    return repeated
 
 
 def onehot(k):
@@ -61,7 +66,8 @@ def log_sum_exp(tensor, dim=-1, sum_op=torch.sum):
 def dynamic_partition(data, partitions, num_partitions):
     res = []
     for i in range(num_partitions):
-        res += [data[(partitions == i).nonzero().squeeze(1)]]
+        res += [data[(partitions == i)]]
+        # res += [data[(partitions == i).nonzero().squeeze(1)]]
     return res
 
 
@@ -87,7 +93,7 @@ def dynamic_stitch(indices, data):
         d = data_.view(idx.numel(), -1)
         k = 0
         for idx_ in idx: res[idx_] = d[k]; k += 1
-    return res
+    return torch.tensor(res).unsqueeze(1)
 
 
 def dynamic_stitch_(inputs, conditional_indices):
@@ -118,20 +124,21 @@ def sequence_mask(lengths, maxlen, dtype=torch.bool):
     return mask
 
 
-def batch_normalization(batch_data_list, types_list, miss_list):
+def batch_normalization(batch_data, types_list, miss_list):
     normalized_data = []
     normalization_parameters = []
 
-    for i, d in enumerate(batch_data_list):
+    for i, d in enumerate(batch_data.T):
         # Partition the data in missing data (0) and observed data n(1)
+        d = d.unsqueeze(1)
         missing_data, observed_data = dynamic_partition(d, miss_list[:, i], num_partitions=2)
-        condition_indices = dynamic_partition(torch.range(d.size()[0]), miss_list[:, i], num_partitions=2)
+        condition_indices = dynamic_partition(torch.arange(0, d.size()[0]), miss_list[:, i], num_partitions=2)
 
         if types_list[i]['type'] == 'real':
             # We transform the data to a gaussian with mean 0 and std 1
             data_mean, data_var = torch.mean(observed_data, 0), torch.var(observed_data, 0)
             data_var = torch.clamp(data_var, 1e-6, 1e20)  # Avoid zero values
-            aux_X = torch.nn.BatchNorm1d(observed_data)
+            aux_X = torch.nn.BatchNorm1d(1)(observed_data)
 
             normalized_data.append(dynamic_stitch(condition_indices, [missing_data, aux_X]))
             normalization_parameters.append([data_mean, data_var])
@@ -143,7 +150,7 @@ def batch_normalization(batch_data_list, types_list, miss_list):
             data_mean_log, data_var_log = torch.mean(observed_data_log, 0), torch.var(observed_data_log, 0)
 
             data_var_log = torch.clamp(data_var_log, 1e-6, 1e20)  # Avoid zero values
-            aux_X = torch.nn.BatchNorm1d(observed_data_log)
+            aux_X = torch.nn.BatchNorm1d(1)(observed_data_log)
 
             normalized_data.append(dynamic_stitch(condition_indices, [missing_data, aux_X]))
             normalization_parameters.append([data_mean_log, data_var_log])
@@ -154,11 +161,12 @@ def batch_normalization(batch_data_list, types_list, miss_list):
             aux_X = torch.log(observed_data)
 
             normalized_data.append(dynamic_stitch(condition_indices, [missing_data, aux_X]))
-            normalization_parameters.append([0.0, 1.0])
+            normalization_parameters.append([torch.tensor([0.0]), torch.tensor([1.0])])
 
         else:
             # Don't normalize the categorical and ordinal variables
             normalized_data.append(d)
-            normalization_parameters.append([0.0, 1.0])  # No normalization here
+            normalization_parameters.append([torch.tensor([0.0]), torch.tensor([1.0])])  # No normalization here
 
+    normalized_data = torch.cat(normalized_data, dim=1)
     return normalized_data, normalization_parameters

@@ -7,6 +7,7 @@ import numpy as np
 
 from models.vae import VariationalAutoencoder
 from models.vae import Encoder, Decoder, HIDecoder, LadderEncoder, LadderDecoder
+from utils import batch_normalization
 
 
 class Classifier(nn.Module):
@@ -146,11 +147,12 @@ class AuxiliaryDeepGenerativeModel(DeepGenerativeModel):
         logits = self.classifier(torch.cat([x, a], dim=1))
         return logits
 
-    def forward(self, x, y):
+    def forward(self, x, y, miss_list=None, norm_params=None):
         """
         Forward through the model
         :param x: features
         :param y: labels
+        :param norm_params: normalization parameters, not useful here
         :return: reconstruction
         """
         # Auxiliary inference q(a|x)
@@ -174,7 +176,7 @@ class AuxiliaryDeepGenerativeModel(DeepGenerativeModel):
 
 
 class HIAuxiliaryDeepGenerativeModel(AuxiliaryDeepGenerativeModel):
-    def __init(self, dims, types_list, miss_list):
+    def __init__(self, dims, types_list):
         """
         HI-Auxiliary Deep Generative Model. The HI-ADGM introduces an additional
         latent variable 'a', which enables the model to fit
@@ -186,32 +188,49 @@ class HIAuxiliaryDeepGenerativeModel(AuxiliaryDeepGenerativeModel):
         """
         [x_dim, y_dim, z_dim, a_dim, gamma_dim, h_dim] = dims
         super(HIAuxiliaryDeepGenerativeModel, self).__init__([x_dim, y_dim, z_dim, a_dim, h_dim])
+        # everything else the same # TODO ???
+        self.decoder = HIDecoder([y_dim + z_dim, h_dim, gamma_dim, x_dim], types_list)  # p(x|z,g(z))
+        self.types_list = types_list
+        self.miss_list = None
+        self.x_norm = None
 
-        self.decoder = HIDecoder([y_dim, h_dim, self.gamma_dim_output, x_dim], types_list, miss_list)  # p(x|z,g(z))
-
-    def forward(self, x, y):
+    def forward(self, x, y, miss_list=None, norm_params=None):
         """
         Forward through the model
         :param x: features
         :param y: labels
+        :param miss_list: miss list
+        :param norm_params: normalization parameters
         :return: reconstruction
         """
+        self.miss_list = miss_list
+        # Batch normalization of the data
+        x_norm, norm_params = batch_normalization(x, self.types_list, miss_list)
+        self.x_norm = x_norm  # to classify later
+
         # Auxiliary inference q(a|x)
-        q_a, q_a_mu, q_a_log_var = self.aux_encoder(x)
+        q_a, q_a_mu, q_a_log_var = self.aux_encoder(x_norm)
 
         # Latent inference q(z|a,y,x)
-        z, z_mu, z_log_var = self.encoder(torch.cat([x, y, q_a], dim=1))
+        z, z_mu, z_log_var = self.encoder(torch.cat([x_norm, y, q_a], dim=1))
 
         # Generative p(x|g(z),y)
-        log_p_x, log_p_x_missing, samples_x, params_x = self.decoder(torch.cat([z, y], dim=1))
+        # the data x are also given to later compute the reconstruction loss / log likelihood,
+        # alongside parameters and samples
+        # during the handling of the different likelihoods
+        # It may be confusing as a design choice, but it's convenient
+        log_p_x, log_p_x_missing, samples_x, params_x = self.decoder(torch.cat([z, y], dim=1), x, miss_list,
+                                                                     norm_params)
 
         # Generative p(a|z,y,x)
-        p_a, p_a_mu, p_a_log_var = self.aux_decoder(torch.cat([x, y, z], dim=1))
+        p_a, p_a_mu, p_a_log_var = self.aux_decoder(torch.cat([x_norm, y, z], dim=1))
 
+        # KL(q(a|x) || p(a|z,y,x))
         a_kl = self._kld(q_a, (q_a_mu, q_a_log_var), (p_a_mu, p_a_log_var))
-        z_kl = self._kld(z, (z_mu, z_log_var))
+        # KL(q(z|a,y,x) || p(z))
+        z_kl = self._kld(z=z, q_param=(z_mu, z_log_var), p_param=None)  # using z prior
 
-        self.kl_divergence = a_kl + z_kl
+        self.kl_divergence = (a_kl + z_kl).unsqueeze(1)
 
         return log_p_x, log_p_x_missing, samples_x, params_x
 
@@ -222,11 +241,15 @@ class HIAuxiliaryDeepGenerativeModel(AuxiliaryDeepGenerativeModel):
         :param y: label (one-hot encoded)
         :return: x
         """
+        # TODO
         y = y.float()
-        log_p_x, log_p_x_missing, samples_x, params_x = self.decoder(torch.cat([z, y], dim=1))
+        log_p_x, log_p_x_missing, samples_x, params_x = self.decoder(torch.cat([z, y], dim=1), x, miss_list,
+                                                                     norm_params)
         return samples_x
 
-    def classify(self, x):
+    def classify(self, x=None):
+        if x is None:
+            x = self.x_norm
         # Auxiliary inference q(a|x)
         a, a_mu, a_log_var = self.aux_encoder(x)
 

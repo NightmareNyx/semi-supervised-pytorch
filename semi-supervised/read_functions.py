@@ -10,7 +10,7 @@ Functions needed to read the data from different databases
 
 import csv
 import os
-
+import torch
 import numpy as np
 from sklearn.metrics import mean_squared_error
 
@@ -20,6 +20,8 @@ def read_data(data_file, types_file, miss_file, true_miss_file):
     with open(types_file) as f:
         types_dict = [{k: v for k, v in row.items()}
                       for row in csv.DictReader(f, skipinitialspace=True)]
+    for t in types_dict:
+        t['dim'] = int(t['dim'])
 
     # Read data from input file
     with open(data_file, 'r') as f:
@@ -103,7 +105,7 @@ def read_data(data_file, types_file, miss_file, true_miss_file):
     return data, types_dict, miss_mask, true_miss_mask, n_samples
 
 
-def next_batch(data, types_dict, miss_mask, batch_size, index_batch):
+def next_batch(data, labels, types_dict, miss_mask, batch_size, index_batch):
     # Create minibath
     batch_xs = data[index_batch * batch_size:(index_batch + 1) * batch_size, :]
 
@@ -115,10 +117,17 @@ def next_batch(data, types_dict, miss_mask, batch_size, index_batch):
         data_list.append(batch_xs[:, initial_index:initial_index + dim])
         initial_index += dim
 
+    data_tensor = torch.cat(data_list, dim=1)
+
     # Missing data
     miss_list = miss_mask[index_batch * batch_size:(index_batch + 1) * batch_size, :]
 
-    return data_list, miss_list
+    # Labels
+    labels_batch = None
+    if labels is not None:
+        labels_batch = labels[index_batch * batch_size:(index_batch + 1) * batch_size]
+
+    return data_tensor, labels_batch, miss_list
 
 
 def samples_concatenation(samples):

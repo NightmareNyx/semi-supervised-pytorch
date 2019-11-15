@@ -12,7 +12,7 @@ class Stochastic(nn.Module):
     parametrised by mu and log_var.
     """
     def reparametrize(self, mu, log_var):
-        epsilon = Variable(torch.randn(mu.size()), requires_grad=False)
+        epsilon = torch.randn(mu.size(), requires_grad=False)
 
         if mu.is_cuda:
             epsilon = epsilon.cuda()

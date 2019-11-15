@@ -36,23 +36,21 @@ def loglik_real(batch_data, list_type, theta, normalization_params):
 
     # Affine transformation of the parameters
     est_mean = torch.sqrt(data_var) * est_mean + data_mean
+
     est_var = data_var * est_var
     #    est_var = 0.05*tf.ones_like(est_var)
 
     # Compute loglik
-    # TODO find pytorch func for this maybe
-    #  torch.distributions.multivariate_normal.MultivariateNormal(loc, covariance_matrix=None,
-    #  precision_matsrix=None, scale_tril=None, validate_args=None)
-    log_p_x = -0.5 * torch.sum(torch.pow(data - est_mean, 2) / est_var, 1) - int(
-        list_type['dim']) * 0.5 * torch.log(2 * np.pi) - 0.5 * torch.sum(torch.log(est_var), 1)
-    #    log_p_x = -0.5 * tf.reduce_sum(tf.squared_difference(data,est_mean),1)
+    # log_p_x = -0.5 * torch.sum(torch.pow(data - est_mean, 2) / est_var, 1) - int(
+    #     list_type['dim']) * 0.5 * np.log(2 * np.pi) - 0.5 * torch.sum(torch.log(est_var), 1)
+    normal = td.Normal(est_mean, torch.sqrt(est_var))
+    log_p_x = normal.log_prob(data).sum(1)
 
     # Outputs
     output['log_p_x'] = torch.mul(log_p_x, missing_mask)
     output['log_p_x_missing'] = torch.mul(log_p_x, 1.0 - missing_mask)
     output['params'] = [est_mean, est_var]
-    output['samples'] = td.multivariate_normal.MultivariateNormal(est_mean, torch.sqrt(
-        est_var)).sample()
+    output['samples'] = normal.rsample()
 
     return output
 
@@ -80,13 +78,15 @@ def loglik_pos(batch_data, list_type, theta, normalization_params):
     # Compute loglik
     log_p_x = -0.5 * torch.sum(torch.pow(data_log - est_mean, 2) / est_var, 1) \
               - 0.5 * torch.sum(torch.log(2 * np.pi * est_var), 1) - torch.sum(data_log, 1)
+    log_normal = td.LogNormal(est_mean, torch.sqrt(est_var))
+    # log_p_x = log_normal.log_prob(data).sum(1)  ##
 
     output['log_p_x'] = torch.mul(log_p_x, missing_mask)
     output['log_p_x_missing'] = torch.mul(log_p_x, 1.0 - missing_mask)
     output['params'] = [est_mean, est_var]
-    output['samples'] = torch.clamp(
-        torch.exp(td.multivariate_normal.MultivariateNormal(est_mean, torch.sqrt(est_var)).sample()) -
-        1.0, 0, 1e20)
+    output['samples'] = log_normal.rsample() - 1.0  # -1.0 TODO???
+    # output['samples'] = torch.clamp(
+    #     torch.exp(td.Normal(est_mean, torch.sqrt(est_var)).rsample()) - 1.0, 0, 1e20)
 
     return output
 
@@ -103,14 +103,12 @@ def loglik_cat(batch_data, list_type, theta, normalization_params):
     # Compute loglik
     # log_p_x = -tf.nn.softmax_cross_entropy_with_logits(logits=log_pi, labels=data)
     # log_p_x = -tf.nn.softmax_cross_entropy_with_logits_v2(logits=log_pi, labels=tf.stop_gradient(data))
-    data = data.requires_grad = False  # TODO ?????
-    log_p_x = - torch.nn.NLLLoss()(log_pi, data)
+    log_p_x = - torch.nn.NLLLoss()(log_pi, data)  # TODO ??? .detach() ???
 
     output['log_p_x'] = torch.mul(log_p_x, missing_mask)
     output['log_p_x_missing'] = torch.mul(log_p_x, 1.0 - missing_mask)
     output['params'] = log_pi
-    output['samples'] = one_hot(td.categorical.Categorical(probs=nn.Softmax()(log_pi)).sample(),
-                                depth=int(list_type['dim']))
+    output['samples'] = one_hot(td.Categorical(probs=nn.Softmax()(log_pi)).sample(), depth=int(list_type['dim']))
 
     return output
 
@@ -140,15 +138,14 @@ def loglik_ordinal(batch_data, list_type, theta, normalization_params):
     # Compute loglik
     # log_p_x = -nn.softmax_cross_entropy_with_logits_v2(logits=torch.log(mean_probs),
     #                                                       labels=tf.stop_gradient(true_values))
-    true_values = true_values.requires_grad = False  # TODO ?????
-    log_p_x = - torch.nn.CrossEntropyLoss()(mean_probs, true_values)
+    log_p_x = - torch.nn.CrossEntropyLoss()(mean_probs, true_values)  # .detach() ???
 
     output['log_p_x'] = torch.mul(log_p_x, missing_mask)
     output['log_p_x_missing'] = torch.mul(log_p_x, 1.0 - missing_mask)
     output['params'] = mean_probs
-    output['samples'] = sequence_mask(1 + td.categorical.Categorical(logits=torch.log(torch.clamp(mean_probs,
-                                                                                                  epsilon, 1e20)))
-                                      .sample(), int(list_type['dim']), dtype=torch.float32)
+    output['samples'] = sequence_mask(1 + td.Categorical(logits=torch.log(torch.clamp(mean_probs, epsilon, 1e20)))
+                                      .sample(),
+                                      int(list_type['dim']), dtype=torch.float32)
 
     return output
 
@@ -164,12 +161,14 @@ def loglik_count(batch_data, list_type, theta, normalization_params):
     est_lambda = theta
     est_lambda = torch.clamp(torch.nn.Softplus()(est_lambda), epsilon, 1e20)
 
-    log_p_x = -torch.sum(log_poisson_loss(targets=data, log_input=torch.log(est_lambda),
-                                          compute_full_loss=True), 1)
+    # log_p_x = -torch.sum(log_poisson_loss(targets=data, log_input=torch.log(est_lambda),
+    #                                       compute_full_loss=True), 1)
+    poisson = td.Poisson(est_lambda)
+    log_p_x = poisson.log_prob(data).sum(1)
 
     output['log_p_x'] = torch.mul(log_p_x, missing_mask)
     output['log_p_x_missing'] = torch.mul(log_p_x, 1.0 - missing_mask)
     output['params'] = est_lambda
-    output['samples'] = td.poisson.Poisson(est_lambda).sample()
+    output['samples'] = poisson.sample()
 
     return output
