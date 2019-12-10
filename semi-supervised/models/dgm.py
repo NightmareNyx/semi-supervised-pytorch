@@ -193,6 +193,9 @@ class HIAuxiliaryDeepGenerativeModel(AuxiliaryDeepGenerativeModel):
         self.types_list = types_list
         self.miss_list = None
         self.x_norm = None
+        self.samples_z = []
+        self.samples_qa = []
+        self.samples_pa = []
 
     def forward(self, x, y, miss_list=None, norm_params=None):
         """
@@ -210,9 +213,11 @@ class HIAuxiliaryDeepGenerativeModel(AuxiliaryDeepGenerativeModel):
 
         # Auxiliary inference q(a|x)
         q_a, q_a_mu, q_a_log_var = self.aux_encoder(x_norm)
+        self.samples_qa.append([q_a, y])
 
         # Latent inference q(z|a,y,x)
         z, z_mu, z_log_var = self.encoder(torch.cat([x_norm, y, q_a], dim=1))
+        self.samples_z.append([z, y])
 
         # Generative p(x|g(z),y)
         # the data x are also given to later compute the reconstruction loss / log likelihood,
@@ -224,6 +229,7 @@ class HIAuxiliaryDeepGenerativeModel(AuxiliaryDeepGenerativeModel):
 
         # Generative p(a|z,y,x)
         p_a, p_a_mu, p_a_log_var = self.aux_decoder(torch.cat([x_norm, y, z], dim=1))
+        self.samples_pa.append([p_a, y])
 
         # KL(q(a|x) || p(a|z,y,x))
         a_kl = self._kld(q_a, (q_a_mu, q_a_log_var), (p_a_mu, p_a_log_var))
